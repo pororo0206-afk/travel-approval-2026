@@ -208,26 +208,55 @@ async function loadRemote(){
 }
 async function saveStatusRemote(id){
   if(!supabaseClient)return;
-  const e=EVS.find(x=>x.id===id);const d=gd(id);if(!e)return;
+  const e=EVS.find(x=>x.id===id);
+  const d=gd(id);
+  if(!e)return;
+
+  // DB 컬럼명 기준: event_status
+  // event_id, registration_status, flight_reserved, participant_name,
+  // participant_count, airfare_per_person, airfare_total, updated_at
   const row={
-    event_id:id,
-    registration_status:d.reg,
-    flight_reserved:!!d.fl,
-    participant_name:d.att||'',
-    participant_count:+e.att||0,
-    airfare_per_person:+d.fare||0,
-    airfare_total:(+d.fare||0)*(+e.att||0),
+    event_id:Number(id),
+    registration_status:String(d.reg||''),
+    flight_reserved:Boolean(d.fl),
+    participant_name:String(d.att||''),
+    participant_count:Number(e.att||0),
+    airfare_per_person:Number(d.fare||0),
+    airfare_total:Number(d.fare||0)*Number(e.att||0),
     updated_at:new Date().toISOString()
   };
-  const {data:existing,error:selectErr}=await supabaseClient.from('event_status').select('id').eq('event_id',id).limit(1);
-  if(selectErr)throw selectErr;
-  if(existing&&existing.length){
-    const {error}=await supabaseClient.from('event_status').update(row).eq('id',existing[0].id);
-    if(error)throw error;
-  }else{
-    const {error}=await supabaseClient.from('event_status').insert(row);
-    if(error)throw error;
+
+  // 1차: event_id unique constraint가 있으면 upsert가 가장 안정적입니다.
+  let result=await supabaseClient
+    .from('event_status')
+    .upsert(row,{onConflict:'event_id'});
+
+  if(!result.error)return;
+
+  console.warn('Supabase upsert failed, fallback starts:', result.error);
+
+  // 2차: unique constraint가 아직 없거나 upsert가 막힌 경우 수동 저장
+  const selected=await supabaseClient
+    .from('event_status')
+    .select('id,event_id')
+    .eq('event_id',Number(id))
+    .maybeSingle();
+
+  if(selected.error)throw selected.error;
+
+  if(selected.data&&selected.data.id){
+    const updated=await supabaseClient
+      .from('event_status')
+      .update(row)
+      .eq('id',selected.data.id);
+    if(updated.error)throw updated.error;
+    return;
   }
+
+  const inserted=await supabaseClient
+    .from('event_status')
+    .insert(row);
+  if(inserted.error)throw inserted.error;
 }
 function storagePathFromUrl(url){
   const marker='/storage/v1/object/public/'+SUPABASE_BUCKET+'/';
@@ -319,7 +348,7 @@ async function doS(){
     setMsg(supabaseClient?'✓ Supabase 저장 완료':'✓ 로컬 저장됨 — anon key 입력 후 서버 저장 가능',true);
   }catch(err){
     console.error(err);
-    setMsg('Supabase 저장 실패: 테이블/정책/API 키를 확인하세요',false);
+    setMsg('Supabase 저장 실패: '+(err.message||'테이블/정책/API 키를 확인하세요'),false);
   }
   rStats();rTable();
   const e=EVS.find(x=>x.id===CID);if(e)document.getElementById('fare-preview').textContent='총 '+eventFlightTotal(e)+' / 참가인원 '+e.att+'명';
